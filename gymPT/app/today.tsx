@@ -3,7 +3,8 @@ import { useMemo, useState, useEffect } from 'react';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { appendMessage, getHistory } from '@/utils/chat-log';
+import { appendMessage, getHistory, getLifts } from '@/utils/chat-log';
+import { getNextSplitFromLifts } from '@/utils/rag';
 
 export default function TodayScreen() {
   const [input, setInput] = useState('');
@@ -19,10 +20,17 @@ export default function TodayScreen() {
       // stored items include timestamp; map to current message shape
       setMessages(h.map((m: any) => ({ role: m.role, text: m.text })));
     });
+    // compute recommended split on mount
+    getLifts().then((l) => {
+      const next = getNextSplitFromLifts(l as any);
+      setPredictedSplit(next);
+    });
     return () => {
       mounted = false;
     };
   }, []);
+
+  const [predictedSplit, setPredictedSplit] = useState<string | null>(null);
 
   const fetchModels = async () => {
     if (!apiKey) {
@@ -152,6 +160,11 @@ export default function TodayScreen() {
 
   return (
     <ThemedView style={styles.container}>
+      {predictedSplit && (
+        <ThemedView style={styles.predictedContainer}>
+          <ThemedText type="subtitle">Predicted today: {predictedSplit}</ThemedText>
+        </ThemedView>
+      )}
       <ThemedView style={styles.chatBar}>
         <TextInput
           placeholder="Ask Gemini about today’s workout..."
