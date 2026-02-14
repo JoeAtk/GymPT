@@ -3,8 +3,10 @@ import { useMemo, useState, useEffect } from 'react';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { appendMessage, getHistory, getLifts } from '@/utils/chat-log';
+import { appendMessage, getHistory, getLifts, addLift, type LiftEntry } from '@/utils/chat-log';
 import { getNextSplitFromLifts } from '@/utils/rag';
+import { parseLiftEntry } from '@/utils/parse-entry';
+import { Modal, View, TextInput as RNTextInput, TouchableOpacity, Text } from 'react-native';
 
 export default function TodayScreen() {
   const [input, setInput] = useState('');
@@ -31,6 +33,14 @@ export default function TodayScreen() {
   }, []);
 
   const [predictedSplit, setPredictedSplit] = useState<string | null>(null);
+  const [exerciseModalOpen, setExerciseModalOpen] = useState(false);
+  const [exerciseInput, setExerciseInput] = useState('');
+  const [exerciseContext, setExerciseContext] = useState<string | null>(null);
+  const [isParsing, setIsParsing] = useState(false);
+  const [parsedLift, setParsedLift] = useState<LiftEntry | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  const z = (s: string) => s + '\u200B';
 
   const fetchModels = async () => {
     if (!apiKey) {
@@ -192,13 +202,13 @@ export default function TodayScreen() {
                   styles.chatBubble,
                   message.role === 'user' ? styles.userBubble : styles.modelBubble,
                 ]}>
-                <ThemedText
-                  style={[
-                    styles.chatText,
-                    message.role === 'user' ? styles.userText : styles.modelText,
-                  ]}>
-                  {message.text}
-                </ThemedText>
+                  <ThemedText
+                    style={[
+                      styles.chatText,
+                      message.role === 'user' ? styles.userText : styles.modelText,
+                    ]}>
+                    {String(message.text).replace(/\S+/g, (w) => w + '\u200B')}
+                  </ThemedText>
               </ThemedView>
             ))}
           </ThemedView>
@@ -213,9 +223,15 @@ export default function TodayScreen() {
 
         <ThemedView style={styles.card}>
           <ThemedText type="subtitle">Main Lifts</ThemedText>
-          <ThemedText>Bench Press — 4 x 6</ThemedText>
-          <ThemedText>Pull-ups — 4 x 6</ThemedText>
-          <ThemedText>Overhead Press — 3 x 8</ThemedText>
+          <TouchableOpacity onPress={() => { setExerciseContext('Bench Press'); setExerciseModalOpen(true); }}>
+            <ThemedText>Bench Press — 4 x 6</ThemedText>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => { setExerciseContext('Pull-ups'); setExerciseModalOpen(true); }}>
+            <ThemedText>Pull-ups — 4 x 6</ThemedText>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => { setExerciseContext('Overhead Press'); setExerciseModalOpen(true); }}>
+            <ThemedText>Overhead Press — 3 x 8</ThemedText>
+          </TouchableOpacity>
         </ThemedView>
 
         <ThemedView style={styles.card}>
@@ -230,6 +246,106 @@ export default function TodayScreen() {
           <ThemedText>Farmer’s Carry — 3 x 40m</ThemedText>
         </ThemedView>
       </ScrollView>
+
+      <Modal visible={exerciseModalOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <ThemedText type="title">Log: {exerciseContext}</ThemedText>
+            <RNTextInput
+              placeholder="e.g. 4 sets of 6 at 100kg, then a drop set"
+              placeholderTextColor="#8E8E93"
+              style={styles.modalInput}
+              value={exerciseInput}
+              onChangeText={setExerciseInput}
+              editable={!isParsing}
+              multiline
+            />
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: 12 }}>
+              <TouchableOpacity
+                style={styles.listButton}
+                onPress={() => {
+                  setExerciseModalOpen(false);
+                  setExerciseInput('');
+                }}>
+                <ThemedText style={{ color: '#FFFFFF' }}>{z('Cancel')}</ThemedText>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.sendButton}
+                disabled={isParsing}
+                onPress={async () => {
+                  const text = exerciseInput.trim();
+                  if (!text) return;
+                  setIsParsing(true);
+                  try {
+                    const key = (process.env.EXPO_PUBLIC_GEMINI_API_KEY ?? '').trim();
+                    const parsed = await parseLiftEntry(`${exerciseContext ?? ''}: ${text}`, key);
+                    if (!parsed.name || parsed.name === 'Unknown') parsed.name = exerciseContext ?? parsed.name;
+                    setParsedLift(parsed);
+                    setPreviewOpen(true);
+                  } catch (err) {
+                    appendMessage({ role: 'model', text: `Could not parse entry: ${String(err)}`, timestamp: Date.now() }).catch(() => {});
+                  } finally {
+                    setIsParsing(false);
+                  }
+                }}>
+                <ThemedText style={{ color: '#FFFFFF' }}>{isParsing ? z('Parsing...') : z('Parse')}</ThemedText>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Preview modal showing what the model inferred */}
+      <Modal visible={previewOpen} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <ThemedText type="title">Inferred Entry</ThemedText>
+            {parsedLift ? (
+              <View style={{ marginTop: 8 }}>
+                <ThemedText>Name: {parsedLift.name}</ThemedText>
+                <ThemedText>Sets: {parsedLift.sets}</ThemedText>
+                <ThemedText>Reps: {parsedLift.reps}</ThemedText>
+                <ThemedText>Weight: {parsedLift.weight ?? '—'}</ThemedText>
+                <ThemedText>Date: {new Date(parsedLift.timestamp).toLocaleString()}</ThemedText>
+              </View>
+            ) : (
+              <ThemedText>No parsed data available.</ThemedText>
+            )}
+
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: 12 }}>
+              <TouchableOpacity
+                style={styles.listButton}
+                onPress={() => {
+                  // return to editing without saving
+                  setPreviewOpen(false);
+                }}>
+                <ThemedText style={{ color: '#FFFFFF' }}>{z('Edit')}</ThemedText>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.sendButton}
+                onPress={async () => {
+                  if (!parsedLift) return;
+                  try {
+                    await addLift(parsedLift);
+                    appendMessage({ role: 'model', text: `Saved: ${parsedLift.name} ${parsedLift.sets}x${parsedLift.reps} @ ${parsedLift.weight ?? '—'}`, timestamp: Date.now() }).catch(() => {});
+                    setPreviewOpen(false);
+                    setExerciseModalOpen(false);
+                    setExerciseInput('');
+                    setParsedLift(null);
+                    const l = await getLifts();
+                    const next = getNextSplitFromLifts(l as any);
+                    setPredictedSplit(next);
+                  } catch (err) {
+                    appendMessage({ role: 'model', text: `Could not save parsed entry: ${String(err)}`, timestamp: Date.now() }).catch(() => {});
+                  }
+                }}>
+                <ThemedText style={{ color: '#FFFFFF' }}>{z('Confirm')}</ThemedText>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
     </ThemedView>
   );
 }
@@ -310,5 +426,30 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     gap: 6,
     backgroundColor: 'rgba(142,142,147,0.1)',
+  },
+  modalOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    width: '100%',
+    maxHeight: '80%',
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 16,
+  },
+  modalInput: {
+    minHeight: 80,
+    borderRadius: 8,
+    padding: 10,
+    backgroundColor: 'rgba(142,142,147,0.06)',
+    color: '#000',
   },
 });
