@@ -4,7 +4,7 @@ import { useMemo, useState, useEffect } from 'react';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { appendMessage, getHistory, getLifts, addLift, type LiftEntry } from '@/utils/chat-log';
-import { getNextSplitFromLifts } from '@/utils/rag';
+import { getNextSplitFromLifts, buildRAGContext } from '@/utils/rag';
 import { parseLiftEntry } from '@/utils/parse-entry';
 import { Modal, View, TextInput as RNTextInput, TouchableOpacity, Text } from 'react-native';
 
@@ -23,8 +23,8 @@ export default function TodayScreen() {
       setMessages(h.map((m: any) => ({ role: m.role, text: m.text })));
     });
     // compute recommended split on mount
-    getLifts().then((l) => {
-      const next = getNextSplitFromLifts(l as any);
+    getLifts().then(async (l) => {
+      const next = await getNextSplitFromLifts(l as any);
       setPredictedSplit(next);
     });
     return () => {
@@ -126,6 +126,9 @@ export default function TodayScreen() {
     appendMessage({ role: 'user', text: trimmed, timestamp: Date.now() }).catch(() => {});
 
     try {
+      // Build RAG context with goal, last 9 days, and exercise-specific stats if applicable
+      const contextualPrompt = await buildRAGContext(trimmed);
+      
       const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
         {
@@ -135,7 +138,7 @@ export default function TodayScreen() {
             contents: [
               {
                 role: 'user',
-                parts: [{ text: trimmed }],
+                parts: [{ text: contextualPrompt }],
               },
             ],
           }),
@@ -186,7 +189,7 @@ export default function TodayScreen() {
           returnKeyType="send"
           onSubmitEditing={(e: any) => sendMessage(e.nativeEvent.text)}
         />
-        <Pressable style={styles.sendButton} onPress={sendMessage} disabled={isSending}>
+        <Pressable style={styles.sendButton} onPress={() => sendMessage()} disabled={isSending}>
           <ThemedText style={styles.sendButtonText}>{isSending ? '...' : 'Send'}</ThemedText>
         </Pressable>
         
@@ -333,7 +336,7 @@ export default function TodayScreen() {
                     setExerciseInput('');
                     setParsedLift(null);
                     const l = await getLifts();
-                    const next = getNextSplitFromLifts(l as any);
+                    const next = await getNextSplitFromLifts(l as any);
                     setPredictedSplit(next);
                   } catch (err) {
                     appendMessage({ role: 'model', text: `Could not save parsed entry: ${String(err)}`, timestamp: Date.now() }).catch(() => {});
