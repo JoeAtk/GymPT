@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { ScrollView, StyleSheet, Pressable } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -46,6 +47,13 @@ export default function StorageScreen() {
   useEffect(() => {
     load();
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      load();
+      return () => {};
+    }, [])
+  );
 
   const addMock = async () => {
     // Your imported workout history (Toji_Project)

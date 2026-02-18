@@ -2,6 +2,94 @@ import { LiftEntry, getGoal, getLifts, getFoodLog, getUserProfile, FoodEntry, Us
 
 export type Split = 'leg' | 'push' | 'pull' | 'full body' | 'rest' | 'unknown';
 
+export type ControlFlags = {
+  change?: {
+    split?: Split | null;
+    food_tracked?: boolean;
+    graphs_displayed?: boolean;
+  };
+  store?: {
+    lifts?: Array<{ name: string; sets: number; reps: number; weight?: number; timestamp?: number }>;
+    goal?: { text: string };
+    food?: Array<{ name: string; calories: number; proteinGrams?: number; carbsGrams?: number; fatsGrams?: number; fiberGrams?: number; timestamp?: number }>;
+    targets?: {
+      calories?: number;
+      protein?: number;
+      carbs?: number;
+      fats?: number;
+      fiber?: number;
+    };
+  };
+};
+
+export const CONTROL_FORMAT_INSTRUCTIONS = `
+RESPONSE FORMAT (required):
+1) First, output a JSON control block wrapped between <APP_CONTROL> and </APP_CONTROL>.
+2) Then provide the normal user-facing reply in markdown.
+
+Control JSON schema:
+{
+  "change": {
+    "split": "push"|"pull"|"leg"|"full body"|"rest"|null,
+    "food_tracked": true|false,
+    "graphs_displayed": true|false
+  },
+  "store": {
+    "lifts": [{"name":"Bench Press","sets":4,"reps":6,"weight":100,"timestamp":1700000000000}],
+    "goal": {"text":"Increase bench press"},
+    "food": [{"name":"Chicken bowl","calories":650,"proteinGrams":45,"carbsGrams":60,"fatsGrams":15,"fiberGrams":6,"timestamp":1700000000000}],
+    "targets": {"calories":2000,"protein":160,"carbs":200,"fats":65,"fiber":30}
+  }
+}
+
+Rules:
+- If you are not requesting a change, set the field to false (for booleans) or null (for split).
+- Only include a "store" field when you want the app to persist something for later use.
+- If nothing should be stored, omit "store" or set it to an empty object.
+- Only request a split change if you are confident it should change.
+
+FOOD LOGGING:
+- CRITICAL: When the user mentions eating/consuming food, ALWAYS capture it in store.food array.
+- Estimate macros if not provided: protein ~25-50g per meal, carbs ~30-80g, fats ~10-30g, fiber ~3-8g.
+- Use today's timestamp (Date.now() in JS, current time in ms) unless they specify a different time.
+- Set food_tracked to true when you log food.
+- Example meal: {"name":"Chicken bowl with rice","calories":650,"proteinGrams":45,"carbsGrams":60,"fatsGrams":15,"fiberGrams":6,"timestamp":1700000000000}
+
+NUTRITION TARGETS:
+- When discussing daily nutrition goals, optionally set targets in store.targets (e.g., "2000 calories, 150g protein").
+- Target values should be daily limits/goals. Include any that are mentioned.
+- Only set targets if the user explicitly requests them or you're recommending specific values.
+- Example: store.targets: {"calories":2000,"protein":160,"carbs":200,"fats":65,"fiber":30}
+
+Example:
+<APP_CONTROL>
+{"change":{"split":null,"food_tracked":true,"graphs_displayed":false},"store":{"food":[{"name":"Chicken and rice bowl","calories":650,"proteinGrams":45,"carbsGrams":60,"fatsGrams":15,"fiberGrams":6}],"targets":{"calories":2000,"protein":160}}}
+</APP_CONTROL>
+Great! I logged your chicken and rice bowl (650 cal, 45g protein). That's tracking well with your daily intake!
+`;
+
+export function extractControlBlock(text: string): {
+  control: ControlFlags | null;
+  reply: string;
+} {
+  const start = text.indexOf('<APP_CONTROL>');
+  const end = text.indexOf('</APP_CONTROL>');
+  if (start === -1 || end === -1 || end <= start) {
+    return { control: null, reply: text };
+  }
+
+  const jsonStr = text.slice(start + '<APP_CONTROL>'.length, end).trim();
+  let control: ControlFlags | null = null;
+  try {
+    control = JSON.parse(jsonStr) as ControlFlags;
+  } catch (e) {
+    control = null;
+  }
+
+  const reply = (text.slice(0, start) + text.slice(end + '</APP_CONTROL>'.length)).trim();
+  return { control, reply };
+}
+
 /**
  * Classify exercise using built-in rules
  */
@@ -219,9 +307,9 @@ export function isFoodRelatedQuery(query: string): boolean {
 /**
  * Get food log for the last N days
  */
-export function getLastNDaysFoodLog(foodLog: FoodEntry[], days: number): { date: string; entries: FoodEntry[]; totals: { calories: number; protein: number; carbs: number; fats: number } }[] {
+export function getLastNDaysFoodLog(foodLog: FoodEntry[], days: number): { date: string; entries: FoodEntry[]; totals: { calories: number; protein: number; carbs: number; fats: number; fiber: number } }[] {
   const today = new Date();
-  const result: { date: string; entries: FoodEntry[]; totals: { calories: number; protein: number; carbs: number; fats: number } }[] = [];
+  const result: { date: string; entries: FoodEntry[]; totals: { calories: number; protein: number; carbs: number; fats: number; fiber: number } }[] = [];
   
   for (let i = days - 1; i >= 0; i--) {
     const checkDate = new Date(today);
@@ -239,8 +327,9 @@ export function getLastNDaysFoodLog(foodLog: FoodEntry[], days: number): { date:
         protein: acc.protein + (entry.proteinGrams ?? 0),
         carbs: acc.carbs + (entry.carbsGrams ?? 0),
         fats: acc.fats + (entry.fatsGrams ?? 0),
+        fiber: acc.fiber + (entry.fiberGrams ?? 0),
       }),
-      { calories: 0, protein: 0, carbs: 0, fats: 0 }
+      { calories: 0, protein: 0, carbs: 0, fats: 0, fiber: 0 }
     );
     
     result.push({ date: dateStr, entries: dayEntries, totals });
@@ -281,16 +370,16 @@ export async function buildRAGContext(userQuery: string): Promise<string> {
   }
   context += '\n';
   
-  // Always add today's food
+  // Always add today's intake
   const todayFood = getLastNDaysFoodLog(foodLog, 1)[0];
   if (todayFood && todayFood.entries.length > 0) {
-    context += 'TODAY\'S FOOD:\n';
-    context += `  Total: ${todayFood.totals.calories} cal, ${todayFood.totals.protein}g protein, ${todayFood.totals.carbs}g carbs, ${todayFood.totals.fats}g fats\n`;
+    context += 'TODAY\'S INTAKE:\n';
+    context += `  Total: ${todayFood.totals.calories} cal, ${todayFood.totals.protein}g protein, ${todayFood.totals.carbs}g carbs, ${todayFood.totals.fats}g fats, ${todayFood.totals.fiber}g fiber\n`;
     if (todayFood.entries.length <= 5) {
       for (const entry of todayFood.entries) {
         context += `  - ${entry.name}: ${entry.calories} cal`;
-        if (entry.proteinGrams || entry.carbsGrams || entry.fatsGrams) {
-          context += ` (P:${entry.proteinGrams ?? 0}g C:${entry.carbsGrams ?? 0}g F:${entry.fatsGrams ?? 0}g)`;
+        if (entry.proteinGrams || entry.carbsGrams || entry.fatsGrams || entry.fiberGrams) {
+          context += ` (P:${entry.proteinGrams ?? 0}g C:${entry.carbsGrams ?? 0}g F:${entry.fatsGrams ?? 0}g Fi:${entry.fiberGrams ?? 0}g)`;
         }
         context += '\n';
       }
@@ -299,7 +388,7 @@ export async function buildRAGContext(userQuery: string): Promise<string> {
     }
     context += '\n';
   } else {
-    context += 'TODAY\'S FOOD: No food logged yet\n\n';
+    context += 'TODAY\'S INTAKE: No food logged yet\n\n';
   }
   
   // Check if user is asking about specific exercises
@@ -381,7 +470,7 @@ export async function buildRAGContext(userQuery: string): Promise<string> {
       if (day.entries.length === 0) {
         context += 'No food logged\n';
       } else {
-        context += `${day.totals.calories} cal, ${day.totals.protein}g protein, ${day.totals.carbs}g carbs, ${day.totals.fats}g fats`;
+        context += `${day.totals.calories} cal, ${day.totals.protein}g protein, ${day.totals.carbs}g carbs, ${day.totals.fats}g fats, ${day.totals.fiber}g fiber`;
         
         // Show target achievement if targets are set
         if (profile) {
@@ -406,7 +495,14 @@ export async function buildRAGContext(userQuery: string): Promise<string> {
   }
   
   context += '=== END CONTEXT ===\n\n';
-  context += `USER QUERY: ${userQuery}`;
+  context += `USER QUERY: ${userQuery}\n\n`;
+  
+  // Add specific food logging prompt if this is a food-related query
+  if (isFoodRelatedQuery(userQuery)) {
+    context += `IMPORTANT: The user is asking about food/nutrition. If they mention eating or consuming anything (even vague descriptions like "had a snack"), you MUST log it in the control block's store.food array with realistic macro estimates. Always set "food_tracked": true when logging food.\n\n`;
+  }
+  
+  context += CONTROL_FORMAT_INSTRUCTIONS;
   
   return context;
 }

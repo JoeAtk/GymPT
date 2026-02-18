@@ -6,10 +6,22 @@ export type ChatMessage = {
   timestamp: number;
 };
 
+export type NutritionTargets = {
+  calories?: number;
+  protein?: number;
+  carbs?: number;
+  fats?: number;
+  fiber?: number;
+};
+
 const STORAGE_CHAT = 'gympt_chat_history';
 const STORAGE_LIFTS = 'gympt_lifts';
 const STORAGE_GOAL = 'gympt_goal';
 const STORAGE_FOOD = 'gympt_food_log';
+const STORAGE_LATEST_SPLIT = 'gympt_latest_split';
+const STORAGE_TARGETS = 'gympt_nutrition_targets';
+
+const latestSplitListeners = new Set<(split: string) => void>();
 const STORAGE_PROFILE = 'gympt_user_profile';
 const STORAGE_EXERCISE_CATEGORIES = 'gympt_exercise_categories';
 
@@ -161,27 +173,51 @@ export type FoodEntry = {
   proteinGrams?: number;
   carbsGrams?: number;
   fatsGrams?: number;
+  fiberGrams?: number;
   timestamp: number;
 };
 
 export async function getFoodLog(): Promise<FoodEntry[]> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_FOOD);
-    if (!raw) return [];
+    console.log('[getFoodLog] Retrieved from AsyncStorage:', raw ? `${raw.length} bytes (stored ${raw.length > 2 ? 'non-empty' : 'empty'})` : 'null/undefined');
+    if (!raw) {
+      console.log('[getFoodLog] No data in storage, returning empty array');
+      return [];
+    }
     const parsed = JSON.parse(raw);
+    console.log('[getFoodLog] Parsed:', Array.isArray(parsed) ? `${parsed.length} entries` : 'not an array');
     return Array.isArray(parsed) ? parsed : [];
   } catch (e) {
+    console.error('[getFoodLog] Error:', e);
     return [];
   }
 }
 
 export async function addFoodEntry(entry: FoodEntry): Promise<void> {
   try {
-    const cur = await getFoodLog();
+    console.log('[addFoodEntry] Adding:', entry.name, 'calories:', entry.calories);
+    const raw = await AsyncStorage.getItem(STORAGE_FOOD);
+    let cur: FoodEntry[] = [];
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        cur = Array.isArray(parsed) ? parsed : [];
+        console.log('[addFoodEntry] Got', cur.length, 'existing entries');
+      } catch (parseErr) {
+        console.error('[addFoodEntry] Parse error, starting fresh:', parseErr);
+        cur = [];
+      }
+    } else {
+      console.log('[addFoodEntry] No existing entries, starting fresh');
+    }
     cur.push(entry);
-    await AsyncStorage.setItem(STORAGE_FOOD, JSON.stringify(cur));
+    const jsonStr = JSON.stringify(cur);
+    console.log('[addFoodEntry] Saving', cur.length, 'entries (~', jsonStr.length, 'bytes)');
+    await AsyncStorage.setItem(STORAGE_FOOD, jsonStr);
+    console.log('[addFoodEntry] Successfully saved');
   } catch (e) {
-    // ignore
+    console.error('[addFoodEntry] Error:', e);
   }
 }
 
@@ -191,6 +227,51 @@ export async function clearFoodLog(): Promise<void> {
   } catch (e) {
     // ignore
   }
+}
+
+// Nutrition targets
+export async function getNutritionTargets(): Promise<NutritionTargets | null> {
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_TARGETS);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function setNutritionTargets(targets: NutritionTargets): Promise<void> {
+  try {
+    await AsyncStorage.setItem(STORAGE_TARGETS, JSON.stringify(targets));
+  } catch (e) {
+    // ignore
+  }
+}
+
+// Latest split (persisted override)
+export async function getLatestSplit(): Promise<string | null> {
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_LATEST_SPLIT);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function setLatestSplit(split: string): Promise<void> {
+  try {
+    await AsyncStorage.setItem(STORAGE_LATEST_SPLIT, JSON.stringify(split));
+    latestSplitListeners.forEach((cb) => cb(split));
+  } catch (e) {
+    // ignore
+  }
+}
+
+export function onLatestSplitChange(listener: (split: string) => void): () => void {
+  latestSplitListeners.add(listener);
+  return () => {
+    latestSplitListeners.delete(listener);
+  };
 }
 
 // User profile
